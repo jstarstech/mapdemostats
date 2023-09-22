@@ -2,14 +2,19 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
+
+var ctx = context.Background()
 
 func main() {
 	hours := true
@@ -26,6 +31,12 @@ func main() {
 	if err != nil {
 		log.Fatal("Error reading reports", err)
 	}
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
 
 	var toDateTime = func(d string) time.Time {
 		u, _ := strconv.ParseFloat(d, 64)
@@ -106,12 +117,19 @@ func main() {
 
 		if bulk {
 			value, _ := bulkLlisting.Get(pair.Key)
-			log.Println(value)
+
+			err := rdb.Publish(ctx, "hub-counts", value).Err()
+			if err != nil {
+				panic(err)
+			}
 		} else {
 			values, _ := listing.Get(pair.Key)
 
 			for value := range values {
-				log.Println(value)
+				err := rdb.Publish(ctx, "hub-counts", value).Err()
+				if err != nil {
+					panic(err)
+				}
 			}
 		}
 
