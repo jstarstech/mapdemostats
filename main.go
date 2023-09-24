@@ -110,29 +110,32 @@ func main() {
 		bulkLlisting = reportsHourBulk
 	}
 
-	for pair := listing.Oldest(); pair != nil; pair = pair.Next() {
-		var dt = toDateTime(pair.Key)
+	for {
+		for pair := listing.Oldest(); pair != nil; pair = pair.Next() {
+			var dt = toDateTime(pair.Key)
 
-		log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
+			log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
 
-		if bulk {
-			value, _ := bulkLlisting.Get(pair.Key)
+			if bulk {
+				value, _ := bulkLlisting.Get(pair.Key)
 
-			err := rdb.Publish(ctx, "hub-counts", value).Err()
-			if err != nil {
-				panic(err)
-			}
-		} else {
-			values, _ := listing.Get(pair.Key)
-
-			for value := range values {
 				err := rdb.Publish(ctx, "hub-counts", value).Err()
 				if err != nil {
 					panic(err)
 				}
+			} else {
+				values, _ := listing.Get(pair.Key)
+
+				for value := range values {
+					err := rdb.Publish(ctx, "hub-counts", value).Err()
+					if err != nil {
+						panic(err)
+					}
+				}
 			}
+
+			time.Sleep(2 * time.Second)
 		}
 
-		time.Sleep(2 * time.Second)
 	}
 }
