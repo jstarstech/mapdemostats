@@ -20,7 +20,7 @@ func main() {
 	hours := true
 	bulk := true
 
-	file, err := os.Open("demoData.csv")
+	file, err := os.Open("data/demoData.csv")
 
 	if err != nil {
 		log.Fatal("Error while reading the file", err)
