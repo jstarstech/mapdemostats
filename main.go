@@ -32,11 +32,18 @@ func main() {
 		log.Fatal("Error reading reports", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
+	redisUrl := "redis://localhost:6379"
+
+	if ru := os.Getenv("REDIS_URL"); ru != "" {
+		redisUrl = ru
+	}
+
+    opts, err := redis.ParseURL(redisUrl)
+    if err != nil {
+        panic(err)
+    }
+
+	rdb := redis.NewClient(opts)
 
 	var toDateTime = func(d string) time.Time {
 		u, _ := strconv.ParseFloat(d, 64)
