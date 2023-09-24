@@ -60,7 +60,7 @@ func main() {
 	for fileScanner.Scan() {
 		s := strings.SplitN(fileScanner.Text(), ",", 2)
 		reports.Set(s[0], strings.Split(s[1], ","))
-		bulkReports.Set(s[0], s[1])
+		bulkReports.Set(s[0], fileScanner.Text())
 	}
 
 	reportsHour := orderedmap.New[string, []string]()
