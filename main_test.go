@@ -42,6 +42,28 @@ func (p errorPublisher) Publish(_ context.Context, _ string, _ interface{}) *red
 	return redis.NewIntResult(0, p.err)
 }
 
+type fakeRedisPinger struct {
+	cancel context.CancelFunc
+	errs   []error
+	calls  int
+}
+
+func (p *fakeRedisPinger) Ping(_ context.Context) *redis.StatusCmd {
+	if p.cancel != nil {
+		p.cancel()
+	}
+
+	defer func() {
+		p.calls++
+	}()
+
+	if p.calls >= len(p.errs) {
+		return redis.NewStatusResult("PONG", nil)
+	}
+
+	return redis.NewStatusResult("", p.errs[p.calls])
+}
+
 func TestLoadConfigDefaults(t *testing.T) {
 	clearConfigEnv(t)
 
@@ -62,6 +84,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Fatalf("unexpected Redis channel: %q", config.RedisChannel)
 	}
 
+	if !config.RedisConnectRetry {
+		t.Fatal("expected Redis connect retry to default to true")
+	}
+
+	if config.RedisConnectRetryInterval != 2*time.Second {
+		t.Fatalf("unexpected Redis connect retry interval: %s", config.RedisConnectRetryInterval)
+	}
+
 	if !config.GroupByHour {
 		t.Fatal("expected group by hour to default to true")
 	}
@@ -80,6 +110,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("DATA_FILE", "/tmp/reports.csv")
 	t.Setenv("REDIS_URL", "redis://redis:6379")
 	t.Setenv("REDIS_CHANNEL", "custom-channel")
+	t.Setenv("REDIS_CONNECT_RETRY", "true")
+	t.Setenv("REDIS_CONNECT_RETRY_INTERVAL", "250ms")
 	t.Setenv("GROUP_BY_HOUR", "false")
 	t.Setenv("BULK_PUBLISH", "false")
 	t.Setenv("PUBLISH_INTERVAL", "500ms")
@@ -99,6 +131,14 @@ func TestLoadConfigFromEnv(t *testing.T) {
 
 	if config.RedisChannel != "custom-channel" {
 		t.Fatalf("unexpected Redis channel: %q", config.RedisChannel)
+	}
+
+	if !config.RedisConnectRetry {
+		t.Fatal("expected Redis connect retry to be true")
+	}
+
+	if config.RedisConnectRetryInterval != 250*time.Millisecond {
+		t.Fatalf("unexpected Redis connect retry interval: %s", config.RedisConnectRetryInterval)
 	}
 
 	if config.GroupByHour {
@@ -338,6 +378,52 @@ func TestRunPublisherReturnsPublishError(t *testing.T) {
 	}
 }
 
+func TestWaitForRedisReturnsPingErrorWhenRetryDisabled(t *testing.T) {
+	expectedErr := errors.New("redis unavailable")
+	client := &fakeRedisPinger{errs: []error{expectedErr}}
+
+	err := waitForRedis(context.Background(), client, config{})
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected Redis ping error, got %v", err)
+	}
+
+	if client.calls != 1 {
+		t.Fatalf("expected one ping attempt, got %d", client.calls)
+	}
+}
+
+func TestWaitForRedisRetriesUntilPingSucceeds(t *testing.T) {
+	client := &fakeRedisPinger{errs: []error{errors.New("redis unavailable")}}
+
+	err := waitForRedis(context.Background(), client, config{
+		RedisConnectRetry:         true,
+		RedisConnectRetryInterval: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("waitForRedis returned error: %v", err)
+	}
+
+	if client.calls != 2 {
+		t.Fatalf("expected two ping attempts, got %d", client.calls)
+	}
+}
+
+func TestWaitForRedisStopsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeRedisPinger{
+		cancel: cancel,
+		errs:   []error{errors.New("redis unavailable")},
+	}
+
+	err := waitForRedis(ctx, client, config{
+		RedisConnectRetry:         true,
+		RedisConnectRetryInterval: time.Hour,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 
@@ -345,6 +431,8 @@ func clearConfigEnv(t *testing.T) {
 		"DATA_FILE",
 		"REDIS_URL",
 		"REDIS_CHANNEL",
+		"REDIS_CONNECT_RETRY",
+		"REDIS_CONNECT_RETRY_INTERVAL",
 		"GROUP_BY_HOUR",
 		"BULK_PUBLISH",
 		"PUBLISH_INTERVAL",

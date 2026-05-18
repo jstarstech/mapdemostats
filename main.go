@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -22,13 +23,19 @@ type publisher interface {
 	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
 }
 
+type redisPinger interface {
+	Ping(ctx context.Context) *redis.StatusCmd
+}
+
 type config struct {
-	DataFile        string
-	RedisURL        string
-	RedisChannel    string
-	GroupByHour     bool
-	BulkPublish     bool
-	PublishInterval time.Duration
+	DataFile                  string
+	RedisURL                  string
+	RedisChannel              string
+	RedisConnectRetry         bool
+	RedisConnectRetryInterval time.Duration
+	GroupByHour               bool
+	BulkPublish               bool
+	PublishInterval           time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -42,18 +49,30 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	redisConnectRetry, err := parseBoolEnv("REDIS_CONNECT_RETRY", true)
+	if err != nil {
+		return config{}, err
+	}
+
+	redisConnectRetryInterval, err := parseDurationEnv("REDIS_CONNECT_RETRY_INTERVAL", 2*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
 	publishInterval, err := parseDurationEnv("PUBLISH_INTERVAL", 2*time.Second)
 	if err != nil {
 		return config{}, err
 	}
 
 	return config{
-		DataFile:        getEnvDefault("DATA_FILE", "data/demoData.csv"),
-		RedisURL:        getEnvDefault("REDIS_URL", "redis://localhost:6379"),
-		RedisChannel:    getEnvDefault("REDIS_CHANNEL", "hub-counts"),
-		GroupByHour:     groupByHour,
-		BulkPublish:     bulkPublish,
-		PublishInterval: publishInterval,
+		DataFile:                  getEnvDefault("DATA_FILE", "data/demoData.csv"),
+		RedisURL:                  getEnvDefault("REDIS_URL", "redis://localhost:6379"),
+		RedisChannel:              getEnvDefault("REDIS_CHANNEL", "hub-counts"),
+		RedisConnectRetry:         redisConnectRetry,
+		RedisConnectRetryInterval: redisConnectRetryInterval,
+		GroupByHour:               groupByHour,
+		BulkPublish:               bulkPublish,
+		PublishInterval:           publishInterval,
 	}, nil
 }
 
@@ -236,6 +255,26 @@ func runPublisher(
 	}
 }
 
+func waitForRedis(ctx context.Context, client redisPinger, config config) error {
+	for {
+		if err := client.Ping(ctx).Err(); err == nil {
+			return nil
+		} else if !config.RedisConnectRetry {
+			return fmt.Errorf("ping redis: %w", err)
+		} else {
+			log.Printf("Redis ping failed, retrying in %s: %v", config.RedisConnectRetryInterval, err)
+		}
+
+		timer := time.NewTimer(config.RedisConnectRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func main() {
 	if err := loadEnvFile(".env"); err != nil {
 		log.Fatal("Error loading env file: ", err)
@@ -245,14 +284,6 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading config: ", err)
 	}
-
-	file, err := os.Open(config.DataFile)
-
-	if err != nil {
-		log.Fatal("Error while reading the file", err)
-	}
-
-	defer file.Close()
 
 	opts, err := redis.ParseURL(config.RedisURL)
 	if err != nil {
@@ -265,6 +296,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := waitForRedis(ctx, rdb, config); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+
+		log.Fatal("Error connecting to Redis: ", err)
+	}
+
+	file, err := os.Open(config.DataFile)
+
+	if err != nil {
+		log.Fatal("Error while reading the file", err)
+	}
+
+	defer file.Close()
+
 	fileScanner := bufio.NewScanner(file)
 	reports, bulkReports, err := loadReports(fileScanner)
 	if err != nil {
@@ -276,7 +323,7 @@ func main() {
 		log.Fatal("Error grouping reports: ", err)
 	}
 
-	if err := runPublisher(ctx, rdb, config, listing, bulkListing); err != nil && err != context.Canceled {
+	if err := runPublisher(ctx, rdb, config, listing, bulkListing); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal("Error publishing reports: ", err)
 	}
 }
