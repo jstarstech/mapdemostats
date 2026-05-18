@@ -5,11 +5,16 @@ FROM golang:1.26 AS build-stage
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 
 COPY *.go ./
+COPY data ./data
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /mapdemostats
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /mapdemostats
 
 FROM gcr.io/distroless/static-debian12 AS build-release-stage
 
