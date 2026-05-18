@@ -28,20 +28,16 @@ func main() {
 
 	defer file.Close()
 
-	if err != nil {
-		log.Fatal("Error reading reports", err)
-	}
-
 	redisUrl := "redis://localhost:6379"
 
 	if ru := os.Getenv("REDIS_URL"); ru != "" {
 		redisUrl = ru
 	}
 
-    opts, err := redis.ParseURL(redisUrl)
-    if err != nil {
-        panic(err)
-    }
+	opts, err := redis.ParseURL(redisUrl)
+	if err != nil {
+		panic(err)
+	}
 
 	rdb := redis.NewClient(opts)
 
@@ -68,6 +64,10 @@ func main() {
 		s := strings.SplitN(fileScanner.Text(), ",", 2)
 		reports.Set(s[0], strings.Split(s[1], ","))
 		bulkReports.Set(s[0], fileScanner.Text())
+	}
+
+	if err := fileScanner.Err(); err != nil {
+		log.Fatal("Error reading reports", err)
 	}
 
 	reportsHour := orderedmap.New[string, []string]()
