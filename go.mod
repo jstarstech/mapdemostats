@@ -3,6 +3,7 @@ module mapdemostats
 go 1.26
 
 require (
+	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/wk8/go-ordered-map/v2 v2.1.8
 )

@@ -16,6 +16,12 @@ The app reads timestamped CSV rows, keeps the first report for each hour, and pu
 | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 
+Variables can be exported in the shell or placed in a local `.env` file:
+
+```env
+REDIS_URL=redis://localhost:6379
+```
+
 ## Run
 
 ```sh

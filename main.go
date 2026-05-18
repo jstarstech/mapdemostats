@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 
 	orderedmap "github.com/wk8/go-ordered-map/v2"
@@ -32,6 +33,14 @@ func truncToHour(dt time.Time) time.Time {
 
 func toEpoch(dt time.Time) string {
 	return strconv.Itoa(int(dt.Unix()))
+}
+
+func loadEnvFile(path string) error {
+	if err := godotenv.Load(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
 }
 
 func loadReports(scanner *bufio.Scanner) (*orderedmap.OrderedMap[string, []string], *orderedmap.OrderedMap[string, string], error) {
@@ -63,6 +72,10 @@ func loadReports(scanner *bufio.Scanner) (*orderedmap.OrderedMap[string, []strin
 func main() {
 	hours := true
 	bulk := true
+
+	if err := loadEnvFile(".env"); err != nil {
+		log.Fatal("Error loading env file: ", err)
+	}
 
 	file, err := os.Open("data/demoData.csv")
 
