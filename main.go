@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -16,7 +18,9 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-var ctx = context.Background()
+type publisher interface {
+	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
+}
 
 type config struct {
 	DataFile        string
@@ -100,7 +104,7 @@ func toDateTime(d string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse timestamp %q: %w", d, err)
 	}
 
-	return time.Unix(int64(u), 0), nil
+	return time.Unix(int64(u), 0).UTC(), nil
 }
 
 func truncToHour(dt time.Time) time.Time {
@@ -145,6 +149,93 @@ func loadReports(scanner *bufio.Scanner) (*orderedmap.OrderedMap[string, []strin
 	return reports, bulkReports, nil
 }
 
+func selectReports(
+	reports *orderedmap.OrderedMap[string, []string],
+	bulkReports *orderedmap.OrderedMap[string, string],
+	groupByHour bool,
+) (*orderedmap.OrderedMap[string, []string], *orderedmap.OrderedMap[string, string], error) {
+	if !groupByHour {
+		return reports, bulkReports, nil
+	}
+
+	reportsHour := orderedmap.New[string, []string]()
+	for pair := reports.Oldest(); pair != nil; pair = pair.Next() {
+		dt, err := toDateTime(pair.Key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse report timestamp: %w", err)
+		}
+
+		groupKey := toEpoch(truncToHour(dt))
+		if _, exists := reportsHour.Get(groupKey); !exists {
+			reportsHour.Set(groupKey, pair.Value)
+		}
+	}
+
+	reportsHourBulk := orderedmap.New[string, string]()
+	for pair := bulkReports.Oldest(); pair != nil; pair = pair.Next() {
+		dt, err := toDateTime(pair.Key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse report timestamp: %w", err)
+		}
+
+		groupKey := toEpoch(truncToHour(dt))
+		if _, exists := reportsHourBulk.Get(groupKey); !exists {
+			reportsHourBulk.Set(groupKey, pair.Value)
+		}
+	}
+
+	return reportsHour, reportsHourBulk, nil
+}
+
+func runPublisher(
+	ctx context.Context,
+	publisher publisher,
+	config config,
+	listing *orderedmap.OrderedMap[string, []string],
+	bulkListing *orderedmap.OrderedMap[string, string],
+) error {
+	for {
+		for pair := listing.Oldest(); pair != nil; pair = pair.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			dt, err := toDateTime(pair.Key)
+			if err != nil {
+				return fmt.Errorf("parse report timestamp: %w", err)
+			}
+
+			log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
+
+			if config.BulkPublish {
+				value, _ := bulkListing.Get(pair.Key)
+				if err := publisher.Publish(ctx, config.RedisChannel, value).Err(); err != nil {
+					return err
+				}
+			} else {
+				values, _ := listing.Get(pair.Key)
+				for _, value := range values {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+
+					if err := publisher.Publish(ctx, config.RedisChannel, value).Err(); err != nil {
+						return err
+					}
+				}
+			}
+
+			timer := time.NewTimer(config.PublishInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
 func main() {
 	if err := loadEnvFile(".env"); err != nil {
 		log.Fatal("Error loading env file: ", err)
@@ -171,98 +262,21 @@ func main() {
 	rdb := redis.NewClient(opts)
 	defer rdb.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	fileScanner := bufio.NewScanner(file)
 	reports, bulkReports, err := loadReports(fileScanner)
 	if err != nil {
 		log.Fatal("Error reading reports: ", err)
 	}
 
-	reportsHour := orderedmap.New[string, []string]()
-	// reportsHour := orderedmap.New[string, *orderedmap.OrderedMap[string, []string]]()
-
-	for pair := reports.Oldest(); pair != nil; pair = pair.Next() {
-		dt, err := toDateTime(pair.Key)
-		if err != nil {
-			log.Fatal("Error parsing report timestamp: ", err)
-		}
-
-		groupKey := toEpoch(truncToHour(dt))
-		_, exists := reportsHour.Get(groupKey)
-
-		if exists {
-			// reportHour.Set(groupKey, pair.Value)
-		} else {
-			reportsHour.Set(groupKey, pair.Value)
-
-			// reportsHour.Set(groupKey, orderedmap.New[string, []string](
-			// 	orderedmap.WithInitialData(orderedmap.Pair[string, []string]{
-			// 		Key:   pair.Key,
-			// 		Value: pair.Value,
-			// 	})))
-		}
+	listing, bulkListing, err := selectReports(reports, bulkReports, config.GroupByHour)
+	if err != nil {
+		log.Fatal("Error grouping reports: ", err)
 	}
 
-	reportsHourBulk := orderedmap.New[string, string]()
-	// reportsHourBulk := orderedmap.New[string, *orderedmap.OrderedMap[string, string]]()
-
-	for pair := bulkReports.Oldest(); pair != nil; pair = pair.Next() {
-		dt, err := toDateTime(pair.Key)
-		if err != nil {
-			log.Fatal("Error parsing report timestamp: ", err)
-		}
-
-		groupKey := toEpoch(truncToHour(dt))
-		_, exists := reportsHourBulk.Get(groupKey)
-
-		if exists {
-			// reportHourBulk.Set(groupKey, pair.Value)
-		} else {
-			reportsHourBulk.Set(groupKey, pair.Value)
-
-			// reportsHourBulk.Set(groupKey, orderedmap.New[string, string](
-			// 	orderedmap.WithInitialData(orderedmap.Pair[string, string]{
-			// 		Key:   pair.Key,
-			// 		Value: pair.Value,
-			// 	})))
-		}
-	}
-
-	listing := reports
-	bulkLlisting := bulkReports
-	if config.GroupByHour {
-		listing = reportsHour
-		bulkLlisting = reportsHourBulk
-	}
-
-	for {
-		for pair := listing.Oldest(); pair != nil; pair = pair.Next() {
-			dt, err := toDateTime(pair.Key)
-			if err != nil {
-				log.Fatal("Error parsing report timestamp: ", err)
-			}
-
-			log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
-
-			if config.BulkPublish {
-				value, _ := bulkLlisting.Get(pair.Key)
-
-				err := rdb.Publish(ctx, config.RedisChannel, value).Err()
-				if err != nil {
-					panic(err)
-				}
-			} else {
-				values, _ := listing.Get(pair.Key)
-
-				for _, value := range values {
-					err := rdb.Publish(ctx, config.RedisChannel, value).Err()
-					if err != nil {
-						panic(err)
-					}
-				}
-			}
-
-			time.Sleep(config.PublishInterval)
-		}
-
+	if err := runPublisher(ctx, rdb, config, listing, bulkListing); err != nil && err != context.Canceled {
+		log.Fatal("Error publishing reports: ", err)
 	}
 }

@@ -2,12 +2,45 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
+
+type publishCall struct {
+	channel string
+	message interface{}
+}
+
+type fakePublisher struct {
+	cancel context.CancelFunc
+	calls  []publishCall
+}
+
+func (p *fakePublisher) Publish(_ context.Context, channel string, message interface{}) *redis.IntCmd {
+	p.calls = append(p.calls, publishCall{channel: channel, message: message})
+	if p.cancel != nil {
+		p.cancel()
+	}
+
+	return redis.NewIntResult(1, nil)
+}
+
+type errorPublisher struct {
+	err error
+}
+
+func (p errorPublisher) Publish(_ context.Context, _ string, _ interface{}) *redis.IntCmd {
+	return redis.NewIntResult(0, p.err)
+}
 
 func TestLoadConfigDefaults(t *testing.T) {
 	clearConfigEnv(t)
@@ -195,6 +228,113 @@ func TestLoadReportsRejectsMalformedLine(t *testing.T) {
 	_, _, err := loadReports(scanner)
 	if err == nil {
 		t.Fatal("expected malformed line to return an error")
+	}
+}
+
+func TestSelectReportsGroupsByHour(t *testing.T) {
+	reports := orderedmap.New[string, []string]()
+	reports.Set("1710000000", []string{"a"})
+	reports.Set("1710000100", []string{"b"})
+	reports.Set("1710003600", []string{"c"})
+
+	bulkReports := orderedmap.New[string, string]()
+	bulkReports.Set("1710000000", "1710000000,a")
+	bulkReports.Set("1710000100", "1710000100,b")
+	bulkReports.Set("1710003600", "1710003600,c")
+
+	groupedReports, groupedBulkReports, err := selectReports(reports, bulkReports, true)
+	if err != nil {
+		t.Fatalf("selectReports returned error: %v", err)
+	}
+
+	if groupedReports.Len() != 2 {
+		t.Fatalf("expected two grouped reports, got %d", groupedReports.Len())
+	}
+
+	if groupedBulkReports.Len() != 2 {
+		t.Fatalf("expected two grouped bulk reports, got %d", groupedBulkReports.Len())
+	}
+
+	first := groupedReports.Oldest()
+	if first == nil || first.Key != "1710000000" || first.Value[0] != "a" {
+		t.Fatalf("unexpected first grouped report: %#v", first)
+	}
+}
+
+func TestRunPublisherStopsWhenContextCanceledDuringSleep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	publisher := &fakePublisher{cancel: cancel}
+	listing := orderedmap.New[string, []string]()
+	listing.Set("1710000000", []string{"a"})
+	bulkListing := orderedmap.New[string, string]()
+	bulkListing.Set("1710000000", "1710000000,a")
+
+	err := runPublisher(ctx, publisher, config{
+		RedisChannel:    "test-channel",
+		BulkPublish:     true,
+		PublishInterval: time.Hour,
+	}, listing, bulkListing)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected one publish call, got %d", len(publisher.calls))
+	}
+
+	if publisher.calls[0].channel != "test-channel" {
+		t.Fatalf("unexpected channel: %q", publisher.calls[0].channel)
+	}
+
+	if publisher.calls[0].message != "1710000000,a" {
+		t.Fatalf("unexpected message: %q", publisher.calls[0].message)
+	}
+}
+
+func TestRunPublisherPublishesIndividualValues(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	publisher := &fakePublisher{}
+	listing := orderedmap.New[string, []string]()
+	listing.Set("1710000000", []string{"a", "b"})
+	bulkListing := orderedmap.New[string, string]()
+
+	publisher.cancel = cancel
+
+	err := runPublisher(ctx, publisher, config{
+		RedisChannel:    "test-channel",
+		BulkPublish:     false,
+		PublishInterval: time.Hour,
+	}, listing, bulkListing)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected one publish before cancellation, got %d", len(publisher.calls))
+	}
+
+	if publisher.calls[0].message != "a" {
+		t.Fatalf("unexpected message: %q", publisher.calls[0].message)
+	}
+}
+
+func TestRunPublisherReturnsPublishError(t *testing.T) {
+	expectedErr := errors.New("publish failed")
+	listing := orderedmap.New[string, []string]()
+	listing.Set("1710000000", []string{"a"})
+	bulkListing := orderedmap.New[string, string]()
+	bulkListing.Set("1710000000", "1710000000,a")
+
+	err := runPublisher(context.Background(), errorPublisher{err: expectedErr}, config{
+		RedisChannel:    "test-channel",
+		BulkPublish:     true,
+		PublishInterval: time.Hour,
+	}, listing, bulkListing)
+
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected publish error, got %v", err)
 	}
 }
 
