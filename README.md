@@ -51,6 +51,15 @@ docker build -t mapdemostats .
 docker run --rm --network host mapdemostats
 ```
 
+The image includes `data/demoData.csv` as the default data file. To use a custom CSV, mount it and point `DATA_FILE` at the mounted path:
+
+```sh
+docker run --rm --network host \
+  -v "$PWD/data/custom.csv:/data/custom.csv:ro" \
+  -e DATA_FILE=/data/custom.csv \
+  mapdemostats
+```
+
 ## Test
 
 ```sh

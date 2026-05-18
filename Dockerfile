@@ -25,6 +25,4 @@ COPY data/demoData.csv /data/demoData.csv
 
 USER nonroot:nonroot
 
-VOLUME /data
-
 ENTRYPOINT ["/mapdemostats"]
