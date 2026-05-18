@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -15,6 +16,49 @@ import (
 )
 
 var ctx = context.Background()
+
+func toDateTime(d string) (time.Time, error) {
+	u, err := strconv.ParseFloat(d, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse timestamp %q: %w", d, err)
+	}
+
+	return time.Unix(int64(u), 0), nil
+}
+
+func truncToHour(dt time.Time) time.Time {
+	return time.Date(dt.Year(), dt.Month(), dt.Day(), dt.Hour(), 0, 0, 0, time.UTC)
+}
+
+func toEpoch(dt time.Time) string {
+	return strconv.Itoa(int(dt.Unix()))
+}
+
+func loadReports(scanner *bufio.Scanner) (*orderedmap.OrderedMap[string, []string], *orderedmap.OrderedMap[string, string], error) {
+	reports := orderedmap.New[string, []string]()
+	bulkReports := orderedmap.New[string, string]()
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		key, rawValues, ok := strings.Cut(line, ",")
+		if !ok || key == "" || rawValues == "" {
+			return nil, nil, fmt.Errorf("invalid report line: %q", line)
+		}
+
+		reports.Set(key, strings.Split(rawValues, ","))
+		bulkReports.Set(key, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return reports, bulkReports, nil
+}
 
 func main() {
 	hours := true
@@ -40,41 +84,24 @@ func main() {
 	}
 
 	rdb := redis.NewClient(opts)
-
-	var toDateTime = func(d string) time.Time {
-		u, _ := strconv.ParseFloat(d, 64)
-
-		return time.Unix(int64(u), 0)
-	}
-
-	var truncToHour = func(dt time.Time) time.Time {
-		return time.Date(dt.Year(), dt.Month(), dt.Day(), dt.Hour(), 0, 0, 0, time.UTC)
-	}
-
-	var toEpoch = func(dt time.Time) string {
-		return strconv.Itoa(int(dt.Unix()))
-	}
+	defer rdb.Close()
 
 	fileScanner := bufio.NewScanner(file)
-
-	reports := orderedmap.New[string, []string]()
-	bulkReports := orderedmap.New[string, string]()
-
-	for fileScanner.Scan() {
-		s := strings.SplitN(fileScanner.Text(), ",", 2)
-		reports.Set(s[0], strings.Split(s[1], ","))
-		bulkReports.Set(s[0], fileScanner.Text())
-	}
-
-	if err := fileScanner.Err(); err != nil {
-		log.Fatal("Error reading reports", err)
+	reports, bulkReports, err := loadReports(fileScanner)
+	if err != nil {
+		log.Fatal("Error reading reports: ", err)
 	}
 
 	reportsHour := orderedmap.New[string, []string]()
 	// reportsHour := orderedmap.New[string, *orderedmap.OrderedMap[string, []string]]()
 
 	for pair := reports.Oldest(); pair != nil; pair = pair.Next() {
-		groupKey := toEpoch(truncToHour(toDateTime(pair.Key)))
+		dt, err := toDateTime(pair.Key)
+		if err != nil {
+			log.Fatal("Error parsing report timestamp: ", err)
+		}
+
+		groupKey := toEpoch(truncToHour(dt))
 		_, exists := reportsHour.Get(groupKey)
 
 		if exists {
@@ -94,7 +121,12 @@ func main() {
 	// reportsHourBulk := orderedmap.New[string, *orderedmap.OrderedMap[string, string]]()
 
 	for pair := bulkReports.Oldest(); pair != nil; pair = pair.Next() {
-		groupKey := toEpoch(truncToHour(toDateTime(pair.Key)))
+		dt, err := toDateTime(pair.Key)
+		if err != nil {
+			log.Fatal("Error parsing report timestamp: ", err)
+		}
+
+		groupKey := toEpoch(truncToHour(dt))
 		_, exists := reportsHourBulk.Get(groupKey)
 
 		if exists {
@@ -119,7 +151,10 @@ func main() {
 
 	for {
 		for pair := listing.Oldest(); pair != nil; pair = pair.Next() {
-			var dt = toDateTime(pair.Key)
+			dt, err := toDateTime(pair.Key)
+			if err != nil {
+				log.Fatal("Error parsing report timestamp: ", err)
+			}
 
 			log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
 
@@ -133,7 +168,7 @@ func main() {
 			} else {
 				values, _ := listing.Get(pair.Key)
 
-				for value := range values {
+				for _, value := range values {
 					err := rdb.Publish(ctx, "hub-counts", value).Err()
 					if err != nil {
 						panic(err)
