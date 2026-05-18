@@ -15,15 +15,13 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/logging"
 
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-type publisher interface {
+type redisClient interface {
 	Publish(ctx context.Context, channel string, message interface{}) *redis.IntCmd
-}
-
-type redisPinger interface {
 	Ping(ctx context.Context) *redis.StatusCmd
 }
 
@@ -208,7 +206,7 @@ func selectReports(
 
 func runPublisher(
 	ctx context.Context,
-	publisher publisher,
+	client redisClient,
 	config config,
 	listing *orderedmap.OrderedMap[string, []string],
 	bulkListing *orderedmap.OrderedMap[string, string],
@@ -228,7 +226,7 @@ func runPublisher(
 
 			if config.BulkPublish {
 				value, _ := bulkListing.Get(pair.Key)
-				if err := publisher.Publish(ctx, config.RedisChannel, value).Err(); err != nil {
+				if err := publishWithRedisRecovery(ctx, client, config, value); err != nil {
 					return err
 				}
 			} else {
@@ -238,7 +236,7 @@ func runPublisher(
 						return err
 					}
 
-					if err := publisher.Publish(ctx, config.RedisChannel, value).Err(); err != nil {
+					if err := publishWithRedisRecovery(ctx, client, config, value); err != nil {
 						return err
 					}
 				}
@@ -255,10 +253,28 @@ func runPublisher(
 	}
 }
 
-func waitForRedis(ctx context.Context, client redisPinger, config config) error {
+func publishWithRedisRecovery(ctx context.Context, client redisClient, config config, value string) error {
+	for {
+		if err := client.Publish(ctx, config.RedisChannel, value).Err(); err == nil {
+			return nil
+		} else if !config.RedisConnectRetry {
+			return err
+		} else {
+			log.Printf("Redis publish failed, waiting for recovery: %v", err)
+		}
+
+		if err := waitForRedis(ctx, client, config); err != nil {
+			return err
+		}
+	}
+}
+
+func waitForRedis(ctx context.Context, client redisClient, config config) error {
 	for {
 		if err := client.Ping(ctx).Err(); err == nil {
 			return nil
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		} else if !config.RedisConnectRetry {
 			return fmt.Errorf("ping redis: %w", err)
 		} else {
@@ -276,6 +292,10 @@ func waitForRedis(ctx context.Context, client redisPinger, config config) error 
 }
 
 func main() {
+	redis.SetLogger(logging.NewBlacklistLogger([]string{
+		"connection pool: failed to dial",
+	}))
+
 	if err := loadEnvFile(".env"); err != nil {
 		log.Fatal("Error loading env file: ", err)
 	}

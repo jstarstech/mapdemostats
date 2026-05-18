@@ -34,6 +34,10 @@ func (p *fakePublisher) Publish(_ context.Context, channel string, message inter
 	return redis.NewIntResult(1, nil)
 }
 
+func (p *fakePublisher) Ping(_ context.Context) *redis.StatusCmd {
+	return redis.NewStatusResult("PONG", nil)
+}
+
 type errorPublisher struct {
 	err error
 }
@@ -42,10 +46,18 @@ func (p errorPublisher) Publish(_ context.Context, _ string, _ interface{}) *red
 	return redis.NewIntResult(0, p.err)
 }
 
+func (p errorPublisher) Ping(_ context.Context) *redis.StatusCmd {
+	return redis.NewStatusResult("PONG", nil)
+}
+
 type fakeRedisPinger struct {
 	cancel context.CancelFunc
 	errs   []error
 	calls  int
+}
+
+func (p *fakeRedisPinger) Publish(_ context.Context, _ string, _ interface{}) *redis.IntCmd {
+	return redis.NewIntResult(1, nil)
 }
 
 func (p *fakeRedisPinger) Ping(_ context.Context) *redis.StatusCmd {
@@ -62,6 +74,37 @@ func (p *fakeRedisPinger) Ping(_ context.Context) *redis.StatusCmd {
 	}
 
 	return redis.NewStatusResult("", p.errs[p.calls])
+}
+
+type recoveringRedisClient struct {
+	publishErrs []error
+	pingErrs    []error
+	publishes   int
+	pings       int
+}
+
+func (c *recoveringRedisClient) Publish(_ context.Context, _ string, _ interface{}) *redis.IntCmd {
+	defer func() {
+		c.publishes++
+	}()
+
+	if c.publishes >= len(c.publishErrs) {
+		return redis.NewIntResult(1, nil)
+	}
+
+	return redis.NewIntResult(0, c.publishErrs[c.publishes])
+}
+
+func (c *recoveringRedisClient) Ping(_ context.Context) *redis.StatusCmd {
+	defer func() {
+		c.pings++
+	}()
+
+	if c.pings >= len(c.pingErrs) {
+		return redis.NewStatusResult("PONG", nil)
+	}
+
+	return redis.NewStatusResult("", c.pingErrs[c.pings])
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -375,6 +418,53 @@ func TestRunPublisherReturnsPublishError(t *testing.T) {
 
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected publish error, got %v", err)
+	}
+}
+
+func TestPublishWithRedisRecoveryRetriesSameMessage(t *testing.T) {
+	client := &recoveringRedisClient{
+		publishErrs: []error{errors.New("publish failed")},
+		pingErrs:    []error{errors.New("redis unavailable")},
+	}
+
+	err := publishWithRedisRecovery(context.Background(), client, config{
+		RedisChannel:              "test-channel",
+		RedisConnectRetry:         true,
+		RedisConnectRetryInterval: time.Nanosecond,
+	}, "message")
+	if err != nil {
+		t.Fatalf("publishWithRedisRecovery returned error: %v", err)
+	}
+
+	if client.publishes != 2 {
+		t.Fatalf("expected publish to be retried, got %d publish attempts", client.publishes)
+	}
+
+	if client.pings != 2 {
+		t.Fatalf("expected Redis recovery check to retry once, got %d ping attempts", client.pings)
+	}
+}
+
+func TestPublishWithRedisRecoveryReturnsPublishErrorWhenRetryDisabled(t *testing.T) {
+	expectedErr := errors.New("publish failed")
+	client := &recoveringRedisClient{
+		publishErrs: []error{expectedErr},
+	}
+
+	err := publishWithRedisRecovery(context.Background(), client, config{
+		RedisChannel:      "test-channel",
+		RedisConnectRetry: false,
+	}, "message")
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected publish error, got %v", err)
+	}
+
+	if client.publishes != 1 {
+		t.Fatalf("expected one publish attempt, got %d", client.publishes)
+	}
+
+	if client.pings != 0 {
+		t.Fatalf("expected no ping attempts, got %d", client.pings)
 	}
 }
 

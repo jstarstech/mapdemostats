@@ -17,8 +17,8 @@ The app reads timestamped CSV rows, keeps the first report for each hour, and pu
 | `DATA_FILE` | `data/demoData.csv` | CSV file to replay |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `REDIS_CHANNEL` | `hub-counts` | Redis Pub/Sub channel |
-| `REDIS_CONNECT_RETRY` | `true` | Keep retrying Redis startup connection forever |
-| `REDIS_CONNECT_RETRY_INTERVAL` | `2s` | Delay between Redis startup connection attempts |
+| `REDIS_CONNECT_RETRY` | `true` | Keep retrying Redis connection and publish recovery forever |
+| `REDIS_CONNECT_RETRY_INTERVAL` | `2s` | Delay between Redis recovery attempts |
 | `GROUP_BY_HOUR` | `true` | Publish only the first report for each hour |
 | `BULK_PUBLISH` | `true` | Publish the full CSV row instead of individual values |
 | `PUBLISH_INTERVAL` | `2s` | Delay between published reports |
