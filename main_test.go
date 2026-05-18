@@ -6,7 +6,107 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestLoadConfigDefaults(t *testing.T) {
+	clearConfigEnv(t)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+
+	if config.DataFile != "data/demoData.csv" {
+		t.Fatalf("unexpected data file: %q", config.DataFile)
+	}
+
+	if config.RedisURL != "redis://localhost:6379" {
+		t.Fatalf("unexpected Redis URL: %q", config.RedisURL)
+	}
+
+	if config.RedisChannel != "hub-counts" {
+		t.Fatalf("unexpected Redis channel: %q", config.RedisChannel)
+	}
+
+	if !config.GroupByHour {
+		t.Fatal("expected group by hour to default to true")
+	}
+
+	if !config.BulkPublish {
+		t.Fatal("expected bulk publish to default to true")
+	}
+
+	if config.PublishInterval != 2*time.Second {
+		t.Fatalf("unexpected publish interval: %s", config.PublishInterval)
+	}
+}
+
+func TestLoadConfigFromEnv(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATA_FILE", "/tmp/reports.csv")
+	t.Setenv("REDIS_URL", "redis://redis:6379")
+	t.Setenv("REDIS_CHANNEL", "custom-channel")
+	t.Setenv("GROUP_BY_HOUR", "false")
+	t.Setenv("BULK_PUBLISH", "false")
+	t.Setenv("PUBLISH_INTERVAL", "500ms")
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+
+	if config.DataFile != "/tmp/reports.csv" {
+		t.Fatalf("unexpected data file: %q", config.DataFile)
+	}
+
+	if config.RedisURL != "redis://redis:6379" {
+		t.Fatalf("unexpected Redis URL: %q", config.RedisURL)
+	}
+
+	if config.RedisChannel != "custom-channel" {
+		t.Fatalf("unexpected Redis channel: %q", config.RedisChannel)
+	}
+
+	if config.GroupByHour {
+		t.Fatal("expected group by hour to be false")
+	}
+
+	if config.BulkPublish {
+		t.Fatal("expected bulk publish to be false")
+	}
+
+	if config.PublishInterval != 500*time.Millisecond {
+		t.Fatalf("unexpected publish interval: %s", config.PublishInterval)
+	}
+}
+
+func TestLoadConfigRejectsInvalidBool(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("GROUP_BY_HOUR", "sometimes")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid bool to return an error")
+	}
+}
+
+func TestLoadConfigRejectsInvalidDuration(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("PUBLISH_INTERVAL", "fast")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid duration to return an error")
+	}
+}
+
+func TestLoadConfigRejectsNonPositiveDuration(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("PUBLISH_INTERVAL", "0s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected non-positive duration to return an error")
+	}
+}
 
 func TestLoadEnvFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
@@ -95,5 +195,20 @@ func TestLoadReportsRejectsMalformedLine(t *testing.T) {
 	_, _, err := loadReports(scanner)
 	if err == nil {
 		t.Fatal("expected malformed line to return an error")
+	}
+}
+
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+
+	for _, key := range []string{
+		"DATA_FILE",
+		"REDIS_URL",
+		"REDIS_CHANNEL",
+		"GROUP_BY_HOUR",
+		"BULK_PUBLISH",
+		"PUBLISH_INTERVAL",
+	} {
+		t.Setenv(key, "")
 	}
 }

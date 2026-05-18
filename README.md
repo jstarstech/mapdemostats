@@ -14,12 +14,22 @@ The app reads timestamped CSV rows, keeps the first report for each hour, and pu
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `DATA_FILE` | `data/demoData.csv` | CSV file to replay |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
+| `REDIS_CHANNEL` | `hub-counts` | Redis Pub/Sub channel |
+| `GROUP_BY_HOUR` | `true` | Publish only the first report for each hour |
+| `BULK_PUBLISH` | `true` | Publish the full CSV row instead of individual values |
+| `PUBLISH_INTERVAL` | `2s` | Delay between published reports |
 
 Variables can be exported in the shell or placed in a local `.env` file:
 
 ```env
+DATA_FILE=data/demoData.csv
 REDIS_URL=redis://localhost:6379
+REDIS_CHANNEL=hub-counts
+GROUP_BY_HOUR=true
+BULK_PUBLISH=true
+PUBLISH_INTERVAL=2s
 ```
 
 ## Run

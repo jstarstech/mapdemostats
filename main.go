@@ -18,6 +18,82 @@ import (
 
 var ctx = context.Background()
 
+type config struct {
+	DataFile        string
+	RedisURL        string
+	RedisChannel    string
+	GroupByHour     bool
+	BulkPublish     bool
+	PublishInterval time.Duration
+}
+
+func loadConfig() (config, error) {
+	groupByHour, err := parseBoolEnv("GROUP_BY_HOUR", true)
+	if err != nil {
+		return config{}, err
+	}
+
+	bulkPublish, err := parseBoolEnv("BULK_PUBLISH", true)
+	if err != nil {
+		return config{}, err
+	}
+
+	publishInterval, err := parseDurationEnv("PUBLISH_INTERVAL", 2*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
+	return config{
+		DataFile:        getEnvDefault("DATA_FILE", "data/demoData.csv"),
+		RedisURL:        getEnvDefault("REDIS_URL", "redis://localhost:6379"),
+		RedisChannel:    getEnvDefault("REDIS_CHANNEL", "hub-counts"),
+		GroupByHour:     groupByHour,
+		BulkPublish:     bulkPublish,
+		PublishInterval: publishInterval,
+	}, nil
+}
+
+func getEnvDefault(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+
+	return value
+}
+
+func parseBoolEnv(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
+	}
+
+	return parsed, nil
+}
+
+func parseDurationEnv(key string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+
+	if parsed <= 0 {
+		return 0, fmt.Errorf("parse %s: duration must be positive", key)
+	}
+
+	return parsed, nil
+}
+
 func toDateTime(d string) (time.Time, error) {
 	u, err := strconv.ParseFloat(d, 64)
 	if err != nil {
@@ -70,14 +146,16 @@ func loadReports(scanner *bufio.Scanner) (*orderedmap.OrderedMap[string, []strin
 }
 
 func main() {
-	hours := true
-	bulk := true
-
 	if err := loadEnvFile(".env"); err != nil {
 		log.Fatal("Error loading env file: ", err)
 	}
 
-	file, err := os.Open("data/demoData.csv")
+	config, err := loadConfig()
+	if err != nil {
+		log.Fatal("Error loading config: ", err)
+	}
+
+	file, err := os.Open(config.DataFile)
 
 	if err != nil {
 		log.Fatal("Error while reading the file", err)
@@ -85,13 +163,7 @@ func main() {
 
 	defer file.Close()
 
-	redisUrl := "redis://localhost:6379"
-
-	if ru := os.Getenv("REDIS_URL"); ru != "" {
-		redisUrl = ru
-	}
-
-	opts, err := redis.ParseURL(redisUrl)
+	opts, err := redis.ParseURL(config.RedisURL)
 	if err != nil {
 		panic(err)
 	}
@@ -157,7 +229,7 @@ func main() {
 
 	listing := reports
 	bulkLlisting := bulkReports
-	if hours {
+	if config.GroupByHour {
 		listing = reportsHour
 		bulkLlisting = reportsHourBulk
 	}
@@ -171,10 +243,10 @@ func main() {
 
 			log.Println(pair.Key + " sending report " + dt.Format("2006-01-02 15:04:05"))
 
-			if bulk {
+			if config.BulkPublish {
 				value, _ := bulkLlisting.Get(pair.Key)
 
-				err := rdb.Publish(ctx, "hub-counts", value).Err()
+				err := rdb.Publish(ctx, config.RedisChannel, value).Err()
 				if err != nil {
 					panic(err)
 				}
@@ -182,14 +254,14 @@ func main() {
 				values, _ := listing.Get(pair.Key)
 
 				for _, value := range values {
-					err := rdb.Publish(ctx, "hub-counts", value).Err()
+					err := rdb.Publish(ctx, config.RedisChannel, value).Err()
 					if err != nil {
 						panic(err)
 					}
 				}
 			}
 
-			time.Sleep(2 * time.Second)
+			time.Sleep(config.PublishInterval)
 		}
 
 	}
